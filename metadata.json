@@ -1,0 +1,6 @@
+{
+  "name": "Son Sefer",
+  "description": "Fırtınada kalan bir feribotta gizli roller, sosyal çıkarım ve sabotaj üzerine kurulu 6–10 kişilik online parti oyunu.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
