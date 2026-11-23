@@ -43,6 +43,18 @@ async function startServer() {
 
   // WebSocket client registry: code -> Map<playerId, Set<WebSocket>>
   const wsRegistry = new Map<string, Map<string, Set<WebSocket>>>();
+  let wssRef: WebSocketServer | null = null;
+
+  const getOnlineCount = (): number => {
+    if (!wssRef) return 0;
+    let count = 0;
+    for (const client of wssRef.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        count += 1;
+      }
+    }
+    return count;
+  };
 
   const broadcastRoomState = (room: ServerRoomState) => {
     const roomSockets = wsRegistry.get(room.code);
@@ -69,13 +81,19 @@ async function startServer() {
     });
   }, 1000);
 
-  // Public runtime capabilities (booleans only, never keys)
+  // Public runtime capabilities (booleans + live online count, never keys)
   app.get('/api/config', (_req: Request, res: Response) => {
     res.json({
       livekitAvailable: isLiveKitConfigured(),
       supabaseConfigured: isSupabaseConfigured(),
       persistenceMode: persistence.mode,
+      onlineCount: getOnlineCount(),
+      publicRooms: store.listPublicRooms(),
     });
+  });
+
+  app.get('/api/rooms', (_req: Request, res: Response) => {
+    res.json({ rooms: store.listPublicRooms() });
   });
 
   app.post('/api/rooms', async (req: Request, res: Response, next: NextFunction) => {
@@ -250,10 +268,84 @@ async function startServer() {
 
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
+  wssRef = wss;
+
+  type TrackedSocket = WebSocket & { isAlive?: boolean };
+  let lastBroadcastOnline = -1;
+  let lastBroadcastRoomsJson = '';
+
+  const broadcastOnlineCount = (force = false) => {
+    const onlineCount = getOnlineCount();
+    if (!force && onlineCount === lastBroadcastOnline) return;
+    lastBroadcastOnline = onlineCount;
+    const payload = JSON.stringify({ type: 'presence', onlineCount });
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    }
+  };
+
+  const broadcastPublicRooms = (force = false) => {
+    const rooms = store.listPublicRooms();
+    const payload = JSON.stringify({ type: 'rooms', rooms });
+    if (!force && payload === lastBroadcastRoomsJson) return;
+    lastBroadcastRoomsJson = payload;
+    for (const client of wss.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(payload);
+      }
+    }
+  };
+
+  store.setPublicRoomsBroadcaster(() => broadcastPublicRooms());
+
+  const unbindFromRoom = (ws: WebSocket, code: string, playerId: string) => {
+    if (!code || !playerId) return;
+    const roomMap = wsRegistry.get(code);
+    const playerSockets = roomMap?.get(playerId);
+    if (playerSockets) {
+      playerSockets.delete(ws);
+      if (playerSockets.size === 0) {
+        roomMap?.delete(playerId);
+        store.markConnection(code, playerId, false).catch(() => {});
+      }
+    }
+  };
+
+  const heartbeat = setInterval(() => {
+    let terminatedAny = false;
+    for (const client of wss.clients) {
+      const tracked = client as TrackedSocket;
+      if (tracked.isAlive === false) {
+        tracked.terminate();
+        terminatedAny = true;
+        continue;
+      }
+      tracked.isAlive = false;
+      tracked.ping();
+    }
+    if (terminatedAny) {
+      broadcastOnlineCount();
+    }
+  }, 25_000);
+
+  wss.on('close', () => {
+    clearInterval(heartbeat);
+  });
 
   wss.on('connection', (ws) => {
+    const tracked = ws as TrackedSocket;
+    tracked.isAlive = true;
     let boundCode = '';
     let boundPlayerId = '';
+
+    broadcastOnlineCount(true);
+    ws.send(JSON.stringify({ type: 'rooms', rooms: store.listPublicRooms() }));
+
+    ws.on('pong', () => {
+      tracked.isAlive = true;
+    });
 
     ws.on('message', async (raw) => {
       try {
@@ -263,6 +355,9 @@ async function startServer() {
             String(msg.code ?? ''),
             String(msg.token ?? '')
           );
+          if (boundCode && boundPlayerId && (boundCode !== room.code || boundPlayerId !== player.id)) {
+            unbindFromRoom(ws, boundCode, boundPlayerId);
+          }
           boundCode = room.code;
           boundPlayerId = player.id;
 
@@ -285,6 +380,15 @@ async function startServer() {
               state: store.buildClientPayload(room, player.id),
             })
           );
+        } else if (msg?.type === 'leave_room') {
+          const prevCode = boundCode;
+          const prevPlayerId = boundPlayerId;
+          unbindFromRoom(ws, prevCode, prevPlayerId);
+          boundCode = '';
+          boundPlayerId = '';
+          if (prevCode && prevPlayerId) {
+            await store.leaveRoom(prevCode, prevPlayerId);
+          }
         }
       } catch (err) {
         ws.send(
@@ -297,16 +401,10 @@ async function startServer() {
     });
 
     ws.on('close', () => {
-      if (!boundCode || !boundPlayerId) return;
-      const roomMap = wsRegistry.get(boundCode);
-      const playerSockets = roomMap?.get(boundPlayerId);
-      if (playerSockets) {
-        playerSockets.delete(ws);
-        if (playerSockets.size === 0) {
-          roomMap?.delete(boundPlayerId);
-          store.markConnection(boundCode, boundPlayerId, false).catch(() => {});
-        }
-      }
+      unbindFromRoom(ws, boundCode, boundPlayerId);
+      boundCode = '';
+      boundPlayerId = '';
+      broadcastOnlineCount();
     });
   });
 

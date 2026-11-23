@@ -86,6 +86,19 @@ export interface RoomSettings {
   maxPlayers: number; // 6..10
   turnSeconds: number; // 30..90
   voiceEnabled: boolean;
+  isPublic?: boolean;
+}
+
+export interface PublicRoomSummary {
+  code: string;
+  hostNickname: string;
+  hostAvatar: AvatarId;
+  hostColorIndex: number;
+  playerCount: number;
+  maxPlayers: number;
+  turnSeconds: number;
+  voiceEnabled: boolean;
+  createdAt: number;
 }
 
 export interface ClientGameState {

@@ -10,7 +10,13 @@ import {
   type LocalPlayerProfile,
 } from './game/achievements';
 import { getDictionary } from './game/i18n';
-import type { AvatarId, ClientGameState, MissionCard, RoomSettings } from './game/types';
+import type {
+  AvatarId,
+  ClientGameState,
+  MissionCard,
+  PublicRoomSummary,
+  RoomSettings,
+} from './game/types';
 import { AchievementsModal } from './components/AchievementsModal';
 import { ChatPanel } from './components/ChatPanel';
 import { CreateJoinPanel } from './components/CreateJoinPanel';
@@ -41,6 +47,8 @@ export default function App() {
   });
 
   const [livekitAvailable, setLivekitAvailable] = useState(false);
+  const [onlineCount, setOnlineCount] = useState<number | null>(null);
+  const [publicRooms, setPublicRooms] = useState<PublicRoomSummary[]>([]);
   const [gameState, setGameState] = useState<ClientGameState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -67,6 +75,9 @@ export default function App() {
   const roomCodeRef = useRef<string>('');
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
+  const unmountedRef = useRef(false);
+  const hasWsPresenceRef = useRef(false);
+  const hasWsRoomsRef = useRef(false);
 
   // Sync body state attribute for accessibility & verification
   useEffect(() => {
@@ -79,7 +90,7 @@ export default function App() {
     }
   }, [view, gameState]);
 
-  // Fetch public server config
+  // Fetch public server config & initial open rooms
   useEffect(() => {
     fetch('/api/config')
       .then((r) => r.json())
@@ -87,8 +98,27 @@ export default function App() {
         if (typeof data?.livekitAvailable === 'boolean') {
           setLivekitAvailable(data.livekitAvailable);
         }
+        if (typeof data?.onlineCount === 'number' && !hasWsPresenceRef.current) {
+          setOnlineCount(Math.max(1, data.onlineCount));
+        }
+        if (Array.isArray(data?.publicRooms) && !hasWsRoomsRef.current) {
+          setPublicRooms(data.publicRooms);
+        }
       })
       .catch(() => {});
+  }, []);
+
+  const refreshPublicRooms = useCallback(async () => {
+    try {
+      const res = await fetch('/api/rooms');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (Array.isArray(data?.rooms)) {
+        setPublicRooms(data.rooms);
+      }
+    } catch {
+      // Ignore transient network errors
+    }
   }, []);
 
   // Countdown tick synced to server phaseEndsAt
@@ -124,11 +154,16 @@ export default function App() {
     });
   }, [gameState]);
 
-  const connectWebSocket = useCallback((code: string, token: string) => {
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
+  const ensureSiteWebSocket = useCallback(() => {
+    if (unmountedRef.current) return;
+    const existing = wsRef.current;
+    if (
+      existing &&
+      (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
     }
+
     if (reconnectTimerRef.current) {
       window.clearTimeout(reconnectTimerRef.current);
       reconnectTimerRef.current = null;
@@ -140,22 +175,38 @@ export default function App() {
 
     ws.onopen = () => {
       setWsConnected(true);
-      ws.send(JSON.stringify({ type: 'auth', code, token }));
+      if (roomCodeRef.current && sessionTokenRef.current) {
+        ws.send(
+          JSON.stringify({
+            type: 'auth',
+            code: roomCodeRef.current,
+            token: sessionTokenRef.current,
+          })
+        );
+      }
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg?.type === 'state' && msg.state) {
+        if (msg?.type === 'presence' && typeof msg.onlineCount === 'number') {
+          hasWsPresenceRef.current = true;
+          setOnlineCount(Math.max(1, msg.onlineCount));
+        } else if (msg?.type === 'rooms' && Array.isArray(msg.rooms)) {
+          hasWsRoomsRef.current = true;
+          setPublicRooms(msg.rooms);
+        } else if (msg?.type === 'state' && msg.state) {
           setGameState(msg.state);
           // If player was kicked from lobby, exit gracefully
           const stillInRoom = msg.state.players.some(
             (p: { id: string }) => p.id === msg.state.me.id
           );
           if (!stillInRoom) {
-            ws.close();
             sessionTokenRef.current = '';
             roomCodeRef.current = '';
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'leave_room' }));
+            }
             setGameState(null);
             setView('TITLE');
             setError('Oda sahibi tarafından lobiden çıkarıldınız.');
@@ -169,25 +220,42 @@ export default function App() {
     };
 
     ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+      }
       setWsConnected(false);
-      if (roomCodeRef.current && sessionTokenRef.current) {
+      if (!unmountedRef.current) {
         reconnectTimerRef.current = window.setTimeout(() => {
-          if (roomCodeRef.current && sessionTokenRef.current) {
-            connectWebSocket(roomCodeRef.current, sessionTokenRef.current);
-          }
+          ensureSiteWebSocket();
         }, 1800);
       }
     };
   }, []);
 
+  const authRoomSocket = useCallback(
+    (code: string, token: string) => {
+      const current = wsRef.current;
+      if (current && current.readyState === WebSocket.OPEN) {
+        current.send(JSON.stringify({ type: 'auth', code, token }));
+      } else {
+        ensureSiteWebSocket();
+      }
+    },
+    [ensureSiteWebSocket]
+  );
+
   useEffect(() => {
+    unmountedRef.current = false;
+    ensureSiteWebSocket();
     return () => {
+      unmountedRef.current = true;
       roomCodeRef.current = '';
       sessionTokenRef.current = '';
       if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
       wsRef.current?.close();
+      wsRef.current = null;
     };
-  }, []);
+  }, [ensureSiteWebSocket]);
 
   const handleCreateRoom = async (data: {
     nickname: string;
@@ -196,6 +264,7 @@ export default function App() {
     maxPlayers: number;
     turnSeconds: number;
     voiceEnabled: boolean;
+    isPublic: boolean;
   }) => {
     setError(null);
     setIsSubmitting(true);
@@ -212,7 +281,7 @@ export default function App() {
       roomCodeRef.current = json.code;
       setGameState(json.state);
       setView('ROOM');
-      connectWebSocket(json.code, json.sessionToken);
+      authRoomSocket(json.code, json.sessionToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Oda kurulamadı.');
     } finally {
@@ -245,7 +314,7 @@ export default function App() {
       roomCodeRef.current = json.code;
       setGameState(json.state);
       setView('ROOM');
-      connectWebSocket(json.code, json.sessionToken);
+      authRoomSocket(json.code, json.sessionToken);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Odaya katılınamadı.');
     } finally {
@@ -281,8 +350,9 @@ export default function App() {
   const handleLeaveRoom = () => {
     roomCodeRef.current = '';
     sessionTokenRef.current = '';
-    if (reconnectTimerRef.current) window.clearTimeout(reconnectTimerRef.current);
-    wsRef.current?.close();
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'leave_room' }));
+    }
     setGameState(null);
     setNewlyUnlocked([]);
     setMutedIds(new Set());
@@ -355,12 +425,15 @@ export default function App() {
         <TitleScreen
           unlockedCount={unlockedCount}
           totalAchievements={ACHIEVEMENTS.length}
+          onlineCount={onlineCount}
+          openRoomsCount={publicRooms.length}
           onOpenCreate={() => {
             setError(null);
             setView('CREATE');
           }}
           onOpenJoin={() => {
             setError(null);
+            refreshPublicRooms();
             setView('JOIN');
           }}
           onOpenRules={() => setInfoModal('rules')}
@@ -374,12 +447,15 @@ export default function App() {
           initialMode={view === 'CREATE' ? 'create' : 'join'}
           initialRoomCode={inviteCode}
           livekitAvailable={livekitAvailable}
+          onlineCount={onlineCount}
+          publicRooms={publicRooms}
           isSubmitting={isSubmitting}
           error={error}
           onBack={() => {
             setError(null);
             setView('TITLE');
           }}
+          onRefreshRooms={refreshPublicRooms}
           onCreateRoom={handleCreateRoom}
           onJoinRoom={handleJoinRoom}
         />
@@ -410,6 +486,18 @@ export default function App() {
                     <span className="hidden sm:inline">{t.status.reconnecting}</span>
                   </span>
                 )}
+                <span
+                  className="inline-flex min-h-[34px] items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-950/60 px-2.5 py-1 text-xs font-semibold text-emerald-300 tabular-nums"
+                  title="Sitedeki anlık çevrimiçi sayısı"
+                  aria-label={`Çevrimiçi sayısı: ${Math.max(1, onlineCount ?? 1)}`}
+                >
+                  <span
+                    className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse"
+                    aria-hidden="true"
+                  />
+                  <span className="hidden sm:inline">Çevrimiçi:</span>
+                  <span>{Math.max(1, onlineCount ?? 1)}</span>
+                </span>
                 <button
                   type="button"
                   onClick={() => setAchievementsOpen(true)}

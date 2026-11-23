@@ -195,7 +195,7 @@ export function LobbyScreen({
       {isHost && (
         <div className="rounded-2xl border border-slate-800 bg-[#0F1B2B] p-5">
           <h2 className="text-sm font-semibold text-slate-200">Oda Sahibi Ayarları</h2>
-          <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="mt-3 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             <div>
               <label htmlFor="lobby-max-players" className="block text-xs text-slate-400">
                 {t.forms.maxPlayersLabel}
@@ -230,6 +230,18 @@ export function LobbyScreen({
                   </option>
                 ))}
               </select>
+            </div>
+
+            <div className="flex flex-col justify-end">
+              <label className="flex min-h-[44px] cursor-pointer items-center justify-between rounded-xl border border-slate-700 bg-[#08101A] px-3 text-sm text-slate-200">
+                <span>Açık Oda</span>
+                <input
+                  type="checkbox"
+                  checked={state.settings.isPublic !== false}
+                  onChange={(e) => onUpdateSettings({ isPublic: e.target.checked })}
+                  className="h-5 w-5 accent-amber-500"
+                />
+              </label>
             </div>
 
             <div className="flex flex-col justify-end">

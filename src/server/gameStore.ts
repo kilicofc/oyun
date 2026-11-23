@@ -28,6 +28,7 @@ import type {
   MissionRecord,
   PlayerAward,
   PlayerPublicView,
+  PublicRoomSummary,
   ReportRecord,
   Role,
   RoomSettings,
@@ -104,6 +105,7 @@ export class GameStore {
   private rooms = new Map<string, ServerRoomState>();
   private chatRateLimits = new Map<string, number[]>();
   private onRoomUpdated?: (room: ServerRoomState) => void;
+  private onPublicRoomsChanged?: () => void;
   private persistence: PersistenceAdapter;
 
   constructor(persistence: PersistenceAdapter, onRoomUpdated?: (room: ServerRoomState) => void) {
@@ -130,6 +132,10 @@ export class GameStore {
     this.onRoomUpdated = cb;
   }
 
+  setPublicRoomsBroadcaster(cb: () => void): void {
+    this.onPublicRoomsChanged = cb;
+  }
+
   private generateRoomCode(): string {
     for (let attempt = 0; attempt < 20; attempt++) {
       let code = '';
@@ -146,6 +152,36 @@ export class GameStore {
     room.expiresAt = Date.now() + ROOM_TTL_MS;
     await this.persistence.saveRoom(room.code, room, room.expiresAt);
     this.onRoomUpdated?.(room);
+    this.onPublicRoomsChanged?.();
+  }
+
+  listPublicRooms(): PublicRoomSummary[] {
+    const now = Date.now();
+    const list: PublicRoomSummary[] = [];
+    for (const room of this.rooms.values()) {
+      if (room.expiresAt <= now) continue;
+      if (room.phase !== 'LOBBY') continue;
+      if (room.settings.isPublic === false) continue;
+      if (room.players.length >= room.settings.maxPlayers) continue;
+      if (!room.players.some((p) => p.isConnected)) continue;
+
+      const host = room.players.find((p) => p.isHost) ?? room.players[0];
+      if (!host) continue;
+
+      list.push({
+        code: room.code,
+        hostNickname: host.nickname,
+        hostAvatar: host.avatar,
+        hostColorIndex: host.colorIndex,
+        playerCount: room.players.length,
+        maxPlayers: room.settings.maxPlayers,
+        turnSeconds: room.settings.turnSeconds,
+        voiceEnabled: room.settings.voiceEnabled && isLiveKitConfigured(),
+        createdAt: room.createdAt,
+      });
+    }
+    list.sort((a, b) => b.createdAt - a.createdAt);
+    return list;
   }
 
   getRoom(code: string): ServerRoomState | undefined {
@@ -175,6 +211,7 @@ export class GameStore {
     maxPlayers?: number;
     turnSeconds?: number;
     voiceEnabled?: boolean;
+    isPublic?: boolean;
   }): Promise<{ code: string; playerId: string; sessionToken: string; state: ClientGameState }> {
     const code = this.generateRoomCode();
     const fallbackIdentity = generateRandomIdentity();
@@ -194,6 +231,7 @@ export class GameStore {
       Math.max(MIN_TURN_SECONDS, Number(input.turnSeconds) || DEFAULT_TURN_SECONDS)
     );
     const voiceEnabled = Boolean(input.voiceEnabled) && isLiveKitConfigured();
+    const isPublic = input.isPublic !== false;
 
     const playerId = crypto.randomUUID();
     const sessionToken = crypto.randomBytes(32).toString('hex');
@@ -218,7 +256,7 @@ export class GameStore {
     const room: ServerRoomState = {
       code,
       phase: 'LOBBY',
-      settings: { maxPlayers, turnSeconds, voiceEnabled },
+      settings: { maxPlayers, turnSeconds, voiceEnabled, isPublic },
       players: [host],
       round: 0,
       attemptInRound: 1,
@@ -394,9 +432,42 @@ export class GameStore {
     if (patch.voiceEnabled !== undefined) {
       room.settings.voiceEnabled = Boolean(patch.voiceEnabled) && isLiveKitConfigured();
     }
+    if (patch.isPublic !== undefined) {
+      room.settings.isPublic = Boolean(patch.isPublic);
+    }
 
     await this.persistAndNotify(room);
     return this.buildClientPayload(room, playerId);
+  }
+
+  async leaveRoom(code: string, playerId: string): Promise<void> {
+    const room = this.rooms.get(code.toUpperCase().trim());
+    if (!room) return;
+    if (room.phase !== 'LOBBY') {
+      await this.markConnection(room.code, playerId, false);
+      return;
+    }
+
+    const idx = room.players.findIndex((p) => p.id === playerId);
+    if (idx === -1) return;
+    const wasHost = room.players[idx].isHost;
+    room.players.splice(idx, 1);
+
+    if (room.players.length === 0) {
+      this.rooms.delete(room.code);
+      await this.persistence.deleteRoom(room.code);
+      this.onPublicRoomsChanged?.();
+      return;
+    }
+
+    room.players.forEach((p, i) => {
+      p.seatIndex = i;
+    });
+    if (wasHost) {
+      room.players[0].isHost = true;
+      room.players[0].isReady = true;
+    }
+    await this.persistAndNotify(room);
   }
 
   async kickPlayer(code: string, hostId: string, targetPlayerId: string): Promise<ClientGameState> {

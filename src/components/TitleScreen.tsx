@@ -6,6 +6,8 @@ const HERO_ART_URL = '/src/assets/images/ferry_storm_hero_1795464715692.jpg';
 export function TitleScreen({
   unlockedCount,
   totalAchievements,
+  onlineCount,
+  openRoomsCount,
   onOpenCreate,
   onOpenJoin,
   onOpenRules,
@@ -14,6 +16,8 @@ export function TitleScreen({
 }: {
   unlockedCount: number;
   totalAchievements: number;
+  onlineCount: number | null;
+  openRoomsCount: number;
   onOpenCreate: () => void;
   onOpenJoin: () => void;
   onOpenRules: () => void;
@@ -21,16 +25,28 @@ export function TitleScreen({
   onOpenAchievements: () => void;
 }) {
   const t = getDictionary('tr');
+  const displayOnline = Math.max(1, onlineCount ?? 1);
 
   return (
     <div className="min-h-dvh flex flex-col bg-[#08101A]">
       {/* Minimal 3-zone top bar */}
-      <header className="mx-auto flex w-full max-w-6xl items-center justify-between gap-1.5 px-3 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:gap-8 sm:px-6 sm:py-3.5">
-        <span className="font-display text-base font-bold tracking-tight text-amber-400 whitespace-nowrap shrink-0 sm:text-xl">
-          {t.appName}
-        </span>
+      <header className="mx-auto flex w-full max-w-6xl items-center justify-between gap-1 px-2.5 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] sm:gap-6 sm:px-6 sm:py-3.5">
+        <div className="flex items-center gap-1.5 shrink-0 sm:gap-2">
+          <span className="font-display text-[15px] font-bold tracking-tight text-amber-400 whitespace-nowrap sm:text-xl">
+            {t.appName}
+          </span>
+          <span
+            className="inline-flex items-center gap-1 rounded-full border border-emerald-500/30 bg-emerald-950/60 px-2 py-0.5 text-[11px] font-semibold text-emerald-300 tabular-nums whitespace-nowrap min-[460px]:gap-1.5 min-[460px]:px-2.5 min-[460px]:py-1"
+            title="Sitedeki anlık çevrimiçi sayısı"
+            aria-label={`Çevrimiçi sayısı: ${displayOnline}`}
+          >
+            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse min-[460px]:h-2 min-[460px]:w-2" aria-hidden="true" />
+            <span className="hidden min-[460px]:inline">Çevrimiçi:</span>
+            <span>{displayOnline}</span>
+          </span>
+        </div>
 
-        <nav className="flex items-center gap-2.5 text-xs font-medium text-slate-300 sm:gap-5 sm:text-sm">
+        <nav className="flex items-center gap-1.5 text-xs font-medium text-slate-300 sm:gap-5 sm:text-sm">
           <button
             type="button"
             onClick={onOpenRules}
@@ -62,7 +78,7 @@ export function TitleScreen({
           type="button"
           onClick={onOpenCreate}
           data-start="true"
-          className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-amber-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 sm:px-5 sm:text-sm"
+          className="inline-flex min-h-[44px] items-center justify-center rounded-xl bg-amber-500 px-2.5 py-2 text-xs font-semibold text-slate-950 hover:bg-amber-400 transition-colors whitespace-nowrap shrink-0 sm:px-5 sm:text-sm"
         >
           {t.actions.createRoom}
         </button>
@@ -95,6 +111,9 @@ export function TitleScreen({
                 <span>8–12 Dakika</span>
                 <span aria-hidden="true">·</span>
                 <span>Tarayıcı Parti Oyunu</span>
+                <span className="min-[460px]:hidden inline-flex items-center gap-1 text-emerald-300">
+                  · Çevrimiçi: {displayOnline}
+                </span>
               </div>
 
               <h1 className="mt-3 font-display text-3xl font-bold tracking-tight text-white sm:text-5xl lg:text-6xl">
@@ -124,7 +143,12 @@ export function TitleScreen({
                   className="inline-flex min-h-[48px] items-center justify-center gap-2 rounded-xl border border-slate-600/80 bg-[#132234]/90 px-6 py-3 text-base font-semibold text-white hover:bg-[#1B2E45] transition-colors"
                 >
                   <Compass className="h-5 w-5 text-amber-400" aria-hidden="true" />
-                  {t.actions.joinRoom}
+                  <span>{t.actions.joinRoom}</span>
+                  {openRoomsCount > 0 && (
+                    <span className="rounded-full bg-emerald-500/20 border border-emerald-500/40 px-2 py-0.5 text-xs font-semibold text-emerald-300 tabular-nums">
+                      {openRoomsCount} Açık
+                    </span>
+                  )}
                 </button>
               </div>
             </div>
